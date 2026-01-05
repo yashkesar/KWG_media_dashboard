@@ -9,6 +9,32 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 
+# --- Helpers ---------------------------------------------------------------
+_NUM_CLEAN_RE = re.compile(r"[^0-9eE+\-\.]+")  # keep digits, signs, decimal, exponent
+
+def coerce_number(v):
+    """Best-effort conversion for cells coming from Google Sheets (may be numbers or formatted strings)."""
+    if v is None:
+        return np.nan
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return float(v)
+    # gspread may give booleans; treat as 1/0
+    if isinstance(v, bool):
+        return 1.0 if v else 0.0
+    s = str(v).strip()
+    if s == "":
+        return np.nan
+    # Common formatting: commas, currency symbols (₹, $, etc.), spaces
+    s = s.replace(",", "")
+    s = _NUM_CLEAN_RE.sub("", s)
+    if s in ("", "+", "-"):
+        return np.nan
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
+# ---------------------------------------------------------------------------
+
 # --- Google OAuth (KW login) + Google Sheets loader -------------------------
 # This avoids sharing the sheet to a service account (often blocked in corporate domains).
 # Each viewer signs in with their KW Google account and the app reads the sheet using their permissions.
@@ -176,7 +202,14 @@ def load_raw_google_sheet(spreadsheet_url_or_id: str, worksheet_name: str, creds
     except Exception as e:
         raise RuntimeError(f"Could not find worksheet/tab '{worksheet_name}'. Details: {e}")
 
-    values = ws.get_all_values()
+        # Fetch raw (unformatted) values so numbers don't come through as '₹ 833,470' / '1,234' strings.
+    # This prevents pd.to_numeric(..., errors='coerce') from turning them into NaN.
+    try:
+        values = ws.get_all_values(value_render_option="UNFORMATTED_VALUE")
+    except TypeError:
+        # Older gspread versions may not support value_render_option on get_all_values.
+        values = ws.get_all_values()
+
     if not values:
         return pd.DataFrame()
 
@@ -350,7 +383,7 @@ def parse_media_table(raw: pd.DataFrame):
                 if col is None:
                     return default
                 v = raw.iat[row_idx, col]
-                vn = pd.to_numeric(v, errors="coerce")
+                vn = coerce_number(v)
                 return float(vn) if not pd.isna(vn) else default
 
             leads = get_num("leads", 0.0)
